@@ -487,6 +487,11 @@ end
 
 function HrmsAuth:access(conf)
 
+     -- Allow CORS preflight requests
+    if kong.request.get_method() == "OPTIONS" then
+        return
+    end
+
     -- ========================================================
     -- 1. TENANT HEADER
     -- ========================================================
