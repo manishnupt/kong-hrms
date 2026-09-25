@@ -110,7 +110,7 @@ local function fetch_jwks(tenant)
 
     local httpc = http.new()
 
-    httpc:set_timeout(5000)
+    httpc:set_timeouts(2000, 2000, 3000) -- connect, send, read (ms)
 
     local url =
         KEYCLOAK_BASE_URL ..
@@ -252,8 +252,27 @@ local function refresh_jwks(tenant)
         tenant
     )
 
+    local cache_key =
+        "hrms-auth:jwks:" .. tenant
+
+    -- Drop the stale cache entry, then re-fetch through
+    -- kong.cache so concurrent requests share a single
+    -- lock/fetch instead of each firing its own request
+    -- at Keycloak, and so the refreshed JWKS is actually
+    -- cached for subsequent requests.
+    kong.cache:invalidate_local(cache_key)
+
     local jwks, err =
-        fetch_jwks(tenant)
+        kong.cache:get(
+            cache_key,
+            nil,
+
+            function()
+                return fetch_jwks(tenant)
+            end,
+
+            JWKS_CACHE_TTL
+        )
 
     if not jwks then
 
