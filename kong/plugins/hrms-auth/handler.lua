@@ -28,17 +28,30 @@ local JWKS_CACHE_TTL = 300
 
 local function unauthorized(code, message, internal_reason)
 
+    local elapsed_ms = "unknown"
+
+    if kong.ctx.shared.hrms_auth_start_time then
+        elapsed_ms =
+            math.floor(
+                (ngx.now() - kong.ctx.shared.hrms_auth_start_time) * 1000
+            )
+    end
+
     if internal_reason then
         kong.log.warn(
             "HRMS AUTH - ",
             code,
             ": ",
-            internal_reason
+            internal_reason,
+            " elapsed_ms=",
+            elapsed_ms
         )
     else
         kong.log.warn(
             "HRMS AUTH - ",
-            code
+            code,
+            " elapsed_ms=",
+            elapsed_ms
         )
     end
 
@@ -120,8 +133,12 @@ local function fetch_jwks(tenant)
 
     kong.log.debug(
         "HRMS AUTH - Fetching JWKS. tenant=",
-        tenant
+        tenant,
+        " url=",
+        url
     )
+
+    local request_start = ngx.now()
 
     local response, err =
         httpc:request_uri(
@@ -137,17 +154,31 @@ local function fetch_jwks(tenant)
             }
         )
 
+    local request_duration_ms =
+        math.floor((ngx.now() - request_start) * 1000)
+
     if not response then
 
         kong.log.err(
             "HRMS AUTH - JWKS request failed. tenant=",
             tenant,
             " error=",
-            tostring(err)
+            tostring(err),
+            " duration_ms=",
+            request_duration_ms
         )
 
         return nil, "JWKS request failed"
     end
+
+    kong.log.debug(
+        "HRMS AUTH - JWKS HTTP response received. tenant=",
+        tenant,
+        " status=",
+        response.status,
+        " duration_ms=",
+        request_duration_ms
+    )
 
     if response.status ~= 200 then
 
@@ -211,17 +242,30 @@ local function get_jwks(tenant)
     local cache_key =
         "hrms-auth:jwks:" .. tenant
 
+    local lookup_start = ngx.now()
+
     local jwks, err =
         kong.cache:get(
             cache_key,
             nil,
 
             function()
+                -- This callback only runs on a cache miss,
+                -- so seeing this log line means we're about
+                -- to make a blocking call out to Keycloak.
+                kong.log.debug(
+                    "HRMS AUTH - JWKS cache miss. tenant=",
+                    tenant
+                )
+
                 return fetch_jwks(tenant)
             end,
 
             JWKS_CACHE_TTL
         )
+
+    local lookup_duration_ms =
+        math.floor((ngx.now() - lookup_start) * 1000)
 
     if not jwks then
 
@@ -229,11 +273,20 @@ local function get_jwks(tenant)
             "HRMS AUTH - Unable to get JWKS. tenant=",
             tenant,
             " error=",
-            tostring(err)
+            tostring(err),
+            " duration_ms=",
+            lookup_duration_ms
         )
 
         return nil, "Unable to retrieve JWKS"
     end
+
+    kong.log.debug(
+        "HRMS AUTH - JWKS lookup complete. tenant=",
+        tenant,
+        " duration_ms=",
+        lookup_duration_ms
+    )
 
     return jwks
 end
@@ -262,6 +315,8 @@ local function refresh_jwks(tenant)
     -- cached for subsequent requests.
     kong.cache:invalidate_local(cache_key)
 
+    local refresh_start = ngx.now()
+
     local jwks, err =
         kong.cache:get(
             cache_key,
@@ -274,17 +329,29 @@ local function refresh_jwks(tenant)
             JWKS_CACHE_TTL
         )
 
+    local refresh_duration_ms =
+        math.floor((ngx.now() - refresh_start) * 1000)
+
     if not jwks then
 
         kong.log.err(
             "HRMS AUTH - JWKS refresh failed. tenant=",
             tenant,
             " error=",
-            tostring(err)
+            tostring(err),
+            " duration_ms=",
+            refresh_duration_ms
         )
 
         return nil, "Unable to refresh JWKS"
     end
+
+    kong.log.info(
+        "HRMS AUTH - JWKS refresh complete. tenant=",
+        tenant,
+        " duration_ms=",
+        refresh_duration_ms
+    )
 
     return jwks
 end
@@ -506,6 +573,15 @@ end
 
 function HrmsAuth:access(conf)
 
+    kong.ctx.shared.hrms_auth_start_time = ngx.now()
+
+    kong.log.debug(
+        "HRMS AUTH - Access phase started. method=",
+        kong.request.get_method(),
+        " path=",
+        kong.request.get_path()
+    )
+
      -- Allow CORS preflight requests
     if kong.request.get_method() == "OPTIONS" then
         return
@@ -633,6 +709,13 @@ function HrmsAuth:access(conf)
             "JWT kid is missing"
         )
     end
+
+    kong.log.debug(
+        "HRMS AUTH - JWT parsed. tenant=",
+        tenant,
+        " kid=",
+        kid
+    )
 
     -- ========================================================
     -- 8. GET JWKS FROM CACHE
@@ -856,7 +939,11 @@ function HrmsAuth:access(conf)
 
     kong.log.info(
         "HRMS AUTH - Authentication successful. tenant=",
-        tenant
+        tenant,
+        " elapsed_ms=",
+        math.floor(
+            (ngx.now() - kong.ctx.shared.hrms_auth_start_time) * 1000
+        )
     )
 
     -- No response means continue to upstream.
