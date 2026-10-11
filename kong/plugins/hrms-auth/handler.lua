@@ -15,9 +15,8 @@ local HrmsAuth = {
 -- CONFIGURATION
 -- ============================================================
 
-local KEYCLOAK_BASE_URL = "https://accounts.pp.worksphere.works"
-
-local CLIENT_ID = "hrms-client"
+-- keycloak_base_url and client_id come from the plugin
+-- config (see schema.lua).
 
 -- JWKS cache: 5 minutes
 local JWKS_CACHE_TTL = 300
@@ -119,14 +118,14 @@ end
 -- FETCH JWKS FROM KEYCLOAK
 -- ============================================================
 
-local function fetch_jwks(tenant)
+local function fetch_jwks(conf, tenant)
 
     local httpc = http.new()
 
     httpc:set_timeouts(2000, 2000, 3000) -- connect, send, read (ms)
 
     local url =
-        KEYCLOAK_BASE_URL ..
+        conf.keycloak_base_url ..
         "/realms/" ..
         tenant ..
         "/protocol/openid-connect/certs"
@@ -234,13 +233,28 @@ local function fetch_jwks(tenant)
 end
 
 -- ============================================================
+-- JWKS CACHE KEY
+--
+-- Includes the Keycloak base URL so plugin instances pointing
+-- at different Keycloak servers never share cached keys.
+-- ============================================================
+
+local function jwks_cache_key(conf, tenant)
+
+    return "hrms-auth:jwks:" ..
+        conf.keycloak_base_url ..
+        ":" ..
+        tenant
+end
+
+-- ============================================================
 -- GET JWKS FROM CACHE
 -- ============================================================
 
-local function get_jwks(tenant)
+local function get_jwks(conf, tenant)
 
     local cache_key =
-        "hrms-auth:jwks:" .. tenant
+        jwks_cache_key(conf, tenant)
 
     local lookup_start = ngx.now()
 
@@ -258,7 +272,7 @@ local function get_jwks(tenant)
                     tenant
                 )
 
-                return fetch_jwks(tenant)
+                return fetch_jwks(conf, tenant)
             end,
 
             JWKS_CACHE_TTL
@@ -298,7 +312,7 @@ end
 -- This handles Keycloak signing-key rotation.
 -- ============================================================
 
-local function refresh_jwks(tenant)
+local function refresh_jwks(conf, tenant)
 
     kong.log.info(
         "HRMS AUTH - Refreshing JWKS. tenant=",
@@ -306,7 +320,7 @@ local function refresh_jwks(tenant)
     )
 
     local cache_key =
-        "hrms-auth:jwks:" .. tenant
+        jwks_cache_key(conf, tenant)
 
     -- Drop the stale cache entry, then re-fetch through
     -- kong.cache so concurrent requests share a single
@@ -323,7 +337,7 @@ local function refresh_jwks(tenant)
             nil,
 
             function()
-                return fetch_jwks(tenant)
+                return fetch_jwks(conf, tenant)
             end,
 
             JWKS_CACHE_TTL
@@ -494,6 +508,7 @@ end
 -- ============================================================
 
 local function validate_claims(
+    conf,
     claims,
     tenant
 )
@@ -509,7 +524,7 @@ local function validate_claims(
     -- ========================================================
 
     local expected_issuer =
-        KEYCLOAK_BASE_URL ..
+        conf.keycloak_base_url ..
         "/realms/" ..
         tenant
 
@@ -545,7 +560,7 @@ local function validate_claims(
     -- AUTHORIZED PARTY
     -- ========================================================
 
-    if claims.azp ~= CLIENT_ID then
+    if claims.azp ~= conf.client_id then
 
         return false,
             "Token azp does not match client"
@@ -722,7 +737,7 @@ function HrmsAuth:access(conf)
     -- ========================================================
 
     local jwks, jwks_err =
-        get_jwks(tenant)
+        get_jwks(conf, tenant)
 
     if not jwks then
 
@@ -760,7 +775,7 @@ function HrmsAuth:access(conf)
         )
 
         jwks, jwks_err =
-            refresh_jwks(tenant)
+            refresh_jwks(conf, tenant)
 
         if not jwks then
 
@@ -880,6 +895,7 @@ function HrmsAuth:access(conf)
     local claims_valid,
           claims_err =
         validate_claims(
+            conf,
             claims,
             tenant
         )
